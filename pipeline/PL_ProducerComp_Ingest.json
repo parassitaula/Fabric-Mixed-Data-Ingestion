@@ -1,0 +1,132 @@
+{
+    "name": "PL_ProducerComp_Ingest",
+    "properties": {
+        "description": "100% pipeline solution — no notebook dependency. Copies regular columns + computed file pointers to Silver Delta table, and writes blob data as individual files to Lakehouse Files section.",
+        "activities": [
+            {
+                "name": "Lookup_BlobData",
+                "type": "Lookup",
+                "description": "Fetch blob columns from SQL. PaymentDetails (JSON) and Attachment (VARBINARY cast to string) are used by ForEach to write individual files.",
+                "typeProperties": {
+                    "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": "SELECT PaymentID, PaymentDetails, CAST(Attachment AS NVARCHAR(MAX)) AS AttachmentStr FROM dbo.ProducerPayments"
+                    },
+                    "firstRowOnly": false
+                }
+            },
+            {
+                "name": "ForEach_WriteBlobs",
+                "type": "ForEach",
+                "description": "Iterate each row: write PaymentDetails as .json file, and Attachment as .bin file (if not null) to Lakehouse Files section.",
+                "dependsOn": [
+                    {
+                        "activity": "Lookup_BlobData",
+                        "dependencyConditions": ["Succeeded"]
+                    }
+                ],
+                "typeProperties": {
+                    "items": {
+                        "value": "@activity('Lookup_BlobData').output.value",
+                        "type": "Expression"
+                    },
+                    "isSequential": false,
+                    "batchCount": 5,
+                    "activities": [
+                        {
+                            "name": "Write_PaymentDetails_JSON",
+                            "type": "Copy",
+                            "description": "Write the PaymentDetails JSON blob as Files/payment_details/{PaymentID}.json",
+                            "typeProperties": {
+                                "source": {
+                                    "type": "AzureSqlSource",
+                                    "sqlReaderQuery": {
+                                        "value": "@concat('SELECT PaymentDetails AS [Content] FROM dbo.ProducerPayments WHERE PaymentID = ', item().PaymentID)",
+                                        "type": "Expression"
+                                    }
+                                },
+                                "sink": {
+                                    "type": "LakehouseFileSink",
+                                    "folderPath": "payment_details",
+                                    "fileName": {
+                                        "value": "@concat(item().PaymentID, '.json')",
+                                        "type": "Expression"
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            "name": "If_HasAttachment",
+                            "type": "IfCondition",
+                            "description": "Only write attachment file when Attachment is not null",
+                            "dependsOn": [
+                                {
+                                    "activity": "Write_PaymentDetails_JSON",
+                                    "dependencyConditions": ["Succeeded"]
+                                }
+                            ],
+                            "typeProperties": {
+                                "expression": {
+                                    "value": "@not(empty(item().AttachmentStr))",
+                                    "type": "Expression"
+                                },
+                                "ifTrueActivities": [
+                                    {
+                                        "name": "Write_Attachment_File",
+                                        "type": "Copy",
+                                        "description": "Write Attachment binary as Files/attachments/{PaymentID}_attachment.bin",
+                                        "typeProperties": {
+                                            "source": {
+                                                "type": "AzureSqlSource",
+                                                "sqlReaderQuery": {
+                                                    "value": "@concat('SELECT CAST(Attachment AS NVARCHAR(MAX)) AS [Content] FROM dbo.ProducerPayments WHERE PaymentID = ', item().PaymentID)",
+                                                    "type": "Expression"
+                                                }
+                                            },
+                                            "sink": {
+                                                "type": "LakehouseFileSink",
+                                                "folderPath": "attachments",
+                                                "fileName": {
+                                                    "value": "@concat(item().PaymentID, '_attachment.bin')",
+                                                    "type": "Expression"
+                                                }
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Copy_SilverTable_WithPointers",
+                "type": "Copy",
+                "description": "Copy regular columns from SQL plus computed file path pointer columns directly into the Silver Delta table. Pointer paths are deterministic based on PaymentID. No notebook needed.",
+                "dependsOn": [
+                    {
+                        "activity": "ForEach_WriteBlobs",
+                        "dependencyConditions": ["Succeeded"]
+                    }
+                ],
+                "typeProperties": {
+                    "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": "SELECT PaymentID, ProducerID, CarrierName, PaymentDate, GrossAmount, CONCAT('Files/payment_details/', CAST(PaymentID AS VARCHAR(20)), '.json') AS PaymentDetailsFilePath, CASE WHEN Attachment IS NOT NULL THEN CONCAT('Files/attachments/', CAST(PaymentID AS VARCHAR(20)), '_attachment.bin') ELSE NULL END AS AttachmentFilePath FROM dbo.ProducerPayments"
+                    },
+                    "sink": {
+                        "type": "LakehouseTableSink",
+                        "tableName": "producer_payments_silver",
+                        "tableActionOption": "Overwrite"
+                    }
+                }
+            }
+        ],
+        "annotations": [
+            "POC",
+            "ProducerCompensation",
+            "PipelineOnly",
+            "NoNotebook"
+        ]
+    }
+}

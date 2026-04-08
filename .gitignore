@@ -1,0 +1,20 @@
+# OS
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Notebook outputs
+.ipynb_checkpoints
+
+# Environment
+.env
+*.env
